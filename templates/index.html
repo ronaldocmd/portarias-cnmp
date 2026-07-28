@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Formatador de Portarias — CNMP-PRESI</title>
+<style>
+  :root{
+    --azul:#0a3d62; --azul2:#1e5f8c; --verde:#1e824c; --cinza:#f4f6f9;
+    --borda:#d8dee6; --texto:#243447; --suave:#6b7a8d; --erro:#c0392b;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    background:linear-gradient(135deg,#0a3d62 0%,#123a52 100%);
+    color:var(--texto); min-height:100vh;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .card{
+    background:#fff; width:100%; max-width:560px; border-radius:16px;
+    box-shadow:0 20px 60px rgba(0,0,0,.30); overflow:hidden;
+  }
+  .head{
+    background:linear-gradient(135deg,var(--azul) 0%,var(--azul2) 100%);
+    color:#fff; padding:28px 32px 24px;
+  }
+  .head h1{margin:0 0 4px; font-size:1.35rem; font-weight:600;}
+  .head p{margin:0; opacity:.85; font-size:.9rem;}
+  .brasao{font-size:2rem; margin-bottom:8px;}
+  .body{padding:28px 32px 32px;}
+  .campo{margin-bottom:18px;}
+  label{display:block; font-size:.82rem; font-weight:600; color:var(--suave);
+        text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px;}
+  .linha{display:flex; gap:14px;}
+  .linha .campo{flex:1;}
+  input[type=number]{
+    width:100%; padding:13px 14px; font-size:1.1rem; border:1.5px solid var(--borda);
+    border-radius:10px; transition:border .15s, box-shadow .15s; outline:none;
+  }
+  input[type=number]:focus{border-color:var(--azul2); box-shadow:0 0 0 3px rgba(30,95,140,.15);}
+  button{
+    width:100%; padding:14px; font-size:1.02rem; font-weight:600; color:#fff;
+    background:linear-gradient(135deg,var(--azul) 0%,var(--azul2) 100%);
+    border:none; border-radius:10px; cursor:pointer; transition:filter .15s, transform .05s;
+  }
+  button:hover{filter:brightness(1.08);}
+  button:active{transform:translateY(1px);}
+  button:disabled{opacity:.55; cursor:not-allowed; filter:none;}
+  .status{margin-top:22px; display:none;}
+  .status.show{display:block;}
+  .barra{height:6px; background:var(--cinza); border-radius:99px; overflow:hidden; margin-bottom:14px;}
+  .barra > i{display:block; height:100%; width:30%;
+    background:linear-gradient(90deg,var(--azul2),var(--verde));
+    border-radius:99px; animation:load 1.3s ease-in-out infinite;}
+  @keyframes load{0%{margin-left:-30%;}100%{margin-left:100%;}}
+  .logbox{
+    background:#0d1b2a; color:#c7d3e0; font-family:'SF Mono',Consolas,monospace;
+    font-size:.78rem; line-height:1.5; padding:14px 16px; border-radius:10px;
+    max-height:190px; overflow-y:auto; white-space:pre-wrap; word-break:break-word;
+  }
+  .logbox .l{opacity:.9;}
+  .result{margin-top:22px; display:none;}
+  .result.show{display:block;}
+  .badge{display:inline-block; padding:4px 12px; border-radius:99px; font-size:.78rem;
+         font-weight:600; margin-bottom:12px;}
+  .badge.dou{background:#e3f0fb; color:var(--azul);}
+  .badge.ele{background:#fdecea; color:var(--erro);}
+  .titulo-port{font-size:1.02rem; font-weight:600; color:var(--azul); margin:6px 0 4px; line-height:1.35;}
+  .meta{font-size:.85rem; color:var(--suave); margin-bottom:16px;}
+  .meta a{color:var(--azul2);}
+  .downloads{display:flex; gap:12px; flex-wrap:wrap;}
+  .btn-dl{
+    flex:1; min-width:180px; text-align:center; text-decoration:none; padding:13px;
+    border-radius:10px; font-weight:600; font-size:.92rem; transition:filter .15s;
+  }
+  .btn-dl.docx{background:linear-gradient(135deg,var(--verde),#16a085); color:#fff;}
+  .btn-dl.pdf{background:#fff; color:var(--azul); border:1.5px solid var(--azul2);}
+  .btn-dl:hover{filter:brightness(1.06);}
+  .erro{margin-top:20px; padding:14px 16px; background:#fdecea; color:var(--erro);
+        border-radius:10px; font-size:.9rem; display:none;}
+  .erro.show{display:block;}
+  .rodape{text-align:center; font-size:.75rem; color:var(--suave); margin-top:22px;}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <div class="brasao">⚖️</div>
+      <h1>Formatador de Portarias</h1>
+      <p>Presidência do Conselho Nacional do Ministério Público</p>
+    </div>
+    <div class="body">
+      <form id="form">
+        <div class="linha">
+          <div class="campo">
+            <label for="numero">Número da portaria</label>
+            <input type="number" id="numero" name="numero" min="1" placeholder="Ex.: 164" required autofocus>
+          </div>
+          <div class="campo">
+            <label for="ano">Ano</label>
+            <input type="number" id="ano" name="ano" min="2000" max="2100" placeholder="Ex.: 2026" value="2026" required>
+          </div>
+        </div>
+        <button type="submit" id="btn">Gerar documento formatado</button>
+      </form>
+
+      <div class="status" id="status">
+        <div class="barra"><i></i></div>
+        <div class="logbox" id="log"></div>
+      </div>
+
+      <div class="erro" id="erro"></div>
+
+      <div class="result" id="result">
+        <span class="badge" id="badge"></span>
+        <div class="titulo-port" id="rTitulo"></div>
+        <div class="meta" id="rMeta"></div>
+        <div class="downloads" id="downloads"></div>
+      </div>
+
+      <div class="rodape">O agente busca o ato no DOU e no portal do CNMP e monta o .docx automaticamente.</div>
+    </div>
+  </div>
+
+<script>
+const form = document.getElementById('form');
+const btn = document.getElementById('btn');
+const statusBox = document.getElementById('status');
+const logBox = document.getElementById('log');
+const resultBox = document.getElementById('result');
+const erroBox = document.getElementById('erro');
+let pollTimer = null;
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const numero = document.getElementById('numero').value.trim();
+  const ano = document.getElementById('ano').value.trim();
+  if (!numero || !ano) return;
+
+  btn.disabled = true;
+  btn.textContent = 'Processando…';
+  resultBox.classList.remove('show');
+  erroBox.classList.remove('show');
+  logBox.innerHTML = '';
+  statusBox.classList.add('show');
+
+  try {
+    const resp = await fetch('/gerar', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({numero, ano})
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'Falha ao iniciar.');
+    poll(data.job_id);
+  } catch (err) {
+    mostrarErro(err.message);
+    resetBtn();
+  }
+});
+
+function poll(jobId){
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try{
+      const r = await fetch('/status/' + jobId);
+      const s = await r.json();
+      renderLog(s.log || []);
+      if (s.status === 'done'){
+        clearInterval(pollTimer);
+        statusBox.classList.remove('show');
+        mostrarResultado(jobId, s.result, s.numero, s.ano);
+        resetBtn();
+      } else if (s.status === 'error'){
+        clearInterval(pollTimer);
+        statusBox.classList.remove('show');
+        mostrarErro(s.error || 'Ocorreu um erro na geração.');
+        resetBtn();
+      }
+    }catch(e){ /* continua tentando */ }
+  }, 1200);
+}
+
+function renderLog(lines){
+  logBox.innerHTML = lines.map(l => '<div class="l">'+escapeHtml(l)+'</div>').join('');
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+function mostrarResultado(jobId, res, numero, ano){
+  if (!res){ mostrarErro('Sem resultado.'); return; }
+  const badge = document.getElementById('badge');
+  if (res.publicado_dou){
+    badge.className = 'badge dou';
+    badge.textContent = '✔ Publicada no DOU — título em azul, com link para a versão certificada';
+  } else {
+    badge.className = 'badge ele';
+    badge.textContent = 'Diário Eletrônico do CNMP — título em vermelho, sem link';
+  }
+  document.getElementById('rTitulo').textContent = res.titulo || ('Portaria '+numero+'/'+ano);
+  let meta = res.n_paragrafos_corpo + ' parágrafo(s) no corpo';
+  if (res.assinaturas && res.assinaturas.length) meta += ' · ' + res.assinaturas.join(', ');
+  if (res.publicacao_campo) meta += '<br><b>Publicação:</b> ' + escapeHtml(res.publicacao_campo);
+  if (res.dou_cert_url) meta += '<br><a href="'+res.dou_cert_url+'" target="_blank">Abrir versão certificada no DOU</a>';
+  if (res.dou_link_impreciso) meta += '<br><span style="color:#b26a00">⚠ O DOU está instável no momento: o link aponta para a edição da seção (não a página exata). Gere novamente mais tarde para o link preciso.</span>';
+  document.getElementById('rMeta').innerHTML = meta;
+
+  let dl = '<a class="btn-dl docx" href="/download/'+jobId+'/docx">⬇ Baixar .docx</a>';
+  if (res.has_pdf) dl += '<a class="btn-dl pdf" href="/download/'+jobId+'/pdf">⬇ PDF certificado (DOU)</a>';
+  document.getElementById('downloads').innerHTML = dl;
+  resultBox.classList.add('show');
+}
+
+function mostrarErro(msg){
+  erroBox.textContent = '⚠ ' + msg;
+  erroBox.classList.add('show');
+}
+function resetBtn(){ btn.disabled = false; btn.textContent = 'Gerar documento formatado'; }
+function escapeHtml(s){ return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+</body>
+</html>
