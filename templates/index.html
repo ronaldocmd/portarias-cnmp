@@ -230,23 +230,34 @@ function mostrarResultado(jobId, res, numero, ano){
 async function enviarUrlManual() {
   const url = document.getElementById('manual-url-input').value.trim();
   const status = document.getElementById('manual-status');
-  if (!url) return;
+  if (!url) { status.innerHTML = "Cole a URL antes de enviar."; return; }
+  const jobId = window.currentJobId;
+  if (!jobId) { status.innerHTML = "job_id não definido."; return; }
 
-  status.innerHTML = "⏳ Baixando PDF...";
+  status.innerHTML = "⏳ Anexando e gerando .docx...";
   try {
     const resp = await fetch('/attach_cert_url', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ job_id: window.currentJobId, cert_url: url })
+      body: JSON.stringify({ job_id: jobId, cert_url: url })
     });
     const data = await resp.json();
-    if (data.ok) {
-        status.innerHTML = "<b style='color:green'>✔ Sucesso! Atualizando...</b>";
-        setTimeout(() => { location.reload(); }, 1500);
+    if (!resp.ok) {
+      status.innerHTML = "<b style='color:red'>❌ " + (data.error || JSON.stringify(data)) + "<​/b>";
+      return;
+    }
+    // Agora requisita o status atualizado do job e atualiza a UI
+    const st = await fetch('/status/' + jobId);
+    const sj = await st.json();
+    if (sj && sj.result) {
+      // chamar a função que já mostra os dados; adaptar se seu nome for diferente
+      mostrarResultado(jobId, sj.result, sj.numero, sj.ano);
+      status.innerHTML = "<b style='color:green'>✔ PDF anexado e .docx atualizado.</b>";
     } else {
-        status.innerHTML = "<b style='color:red'>❌ Erro: " + (data.error || 'falha') + "<​/b>";
+      status.innerHTML = "<b style='color:orange'>✔ PDF anexado. Atualize a página para ver alterações.</b>";
     }
   } catch (e) {
+    console.error(e);
     status.innerHTML = "<b style='color:red'>❌ Erro de conexão.</b>";
   }
 }
