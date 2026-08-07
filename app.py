@@ -163,3 +163,68 @@ def download(job_id, tipo):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "3000"))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+
+@app.route("/attach_cert_url", methods=["POST"])
+def attach_cert_url():
+    """
+    Recebe JSON/form com: job_id, cert_url
+    Tenta baixar o PDF certificado a partir da URL fornecida e atualiza o JOB.
+    """
+    data_in = request.get_json(silent=True) or request.form
+    job_id = data_in.get("job_id")
+    cert_url = (data_in.get("cert_url") or "").strip()
+
+    if not job_id or not cert_url:
+        return jsonify({"error": "job_id e cert_url são obrigatórios."}), 400
+
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job or not job.get("result"):
+            return jsonify({"error": "job não encontrado ou sem resultado ainda."}), 404
+        numero = job["numero"]
+        ano = job["ano"]
+
+    try:
+        # Usa a mesma sessão / cliente do portaria_formatter
+        session = pf.make_session()
+        dou = pf.DOUClient(session)
+
+        # Se o usuário colou diretamente o servlet INPDFViewer, usamos tal qual;
+        # se colou a URL 'visualiza', construímos o servlet com _build_pdf_url.
+        if "INPDFViewer" in cert_url or "servlet/INPDFViewer" in cert_url:
+            servlet = cert_url
+            cert = cert_url if "visualiza" in cert_url else ""  # pode ser servlet direto
+        else:
+            servlet = dou._build_pdf_url(cert_url)
+            cert = cert_url
+
+        # Monta um PortariaData mínimo para passar ao download_certified_pdf
+        pdata = pf.PortariaData(numero=numero, ano=ano)
+        pdata.dou_cert_url = cert or ""
+        pdata.dou_pdf_servlet_url = servlet
+
+        # Caminho onde salvar o PDF (mesma convenção do gerador)
+        pdf_name = f"{ano}.Portaria-CNMP-PRESI.{numero}-DOU-certificada.pdf"
+        pdf_path = os.path.join(OUTPUT_DIR, pdf_name)
+
+        res = dou.download_certified_pdf(pdata, pdf_path)
+        if res:
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                job["result"]["dou_cert_url"] = cert or pdata.dou_cert_url
+                job["result"]["dou_pdf_servlet_url"] = servlet
+                job["result"]["pdf_path"] = pdf_path
+                job["log"].append(f"PDF certificado baixado manualmente: {pdf_path}")
+            return jsonify({"ok": True, "pdf_path": pdf_path})
+        else:
+            with JOBS_LOCK:
+                job = JOBS.get(job_id)
+                job["log"].append("Falha ao baixar PDF usando a URL fornecida.")
+            return jsonify({"error": "falha ao baixar o PDF com a URL fornecida."}), 500
+
+    except Exception as exc:  # noqa: BLE001
+        with JOBS_LOCK:
+            job = JOBS.get(job_id)
+            if job:
+                job["log"].append("ERRO ao baixar PDF com url manual: " + str(exc))
+        return jsonify({"error": str(exc)}), 500
