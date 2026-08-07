@@ -168,7 +168,8 @@ if __name__ == "__main__":
 def attach_cert_url():
     """
     Recebe JSON/form com: job_id, cert_url
-    Tenta baixar o PDF certificado a partir da URL fornecida e atualiza o JOB.
+    Tenta baixar o PDF certificado a partir da URL fornecida, extrai texto
+    (quando possível) e re-gera o .docx usando o PDF certificado — atualiza o JOB.
     """
     data_in = request.get_json(silent=True) or request.form
     job_id = data_in.get("job_id")
@@ -179,52 +180,76 @@ def attach_cert_url():
 
     with JOBS_LOCK:
         job = JOBS.get(job_id)
-        if not job or not job.get("result"):
-            return jsonify({"error": "job não encontrado ou sem resultado ainda."}), 404
+        if not job:
+            return jsonify({"error": "job não encontrado."}), 404
         numero = job["numero"]
         ano = job["ano"]
 
     try:
-        # Usa a mesma sessão / cliente do portaria_formatter
         session = pf.make_session()
         dou = pf.DOUClient(session)
+        cnmp = pf.CNMPClient(session)
 
-        # Se o usuário colou diretamente o servlet INPDFViewer, usamos tal qual;
+        # Se o usuário colou diretamente o servlet do PDF, usamos tal qual;
         # se colou a URL 'visualiza', construímos o servlet com _build_pdf_url.
         if "INPDFViewer" in cert_url or "servlet/INPDFViewer" in cert_url:
             servlet = cert_url
-            cert = cert_url if "visualiza" in cert_url else ""  # pode ser servlet direto
+            cert = cert_url if "visualiza" in cert_url else ""
         else:
+            # tenta construir servlet a partir da visualiza
             servlet = dou._build_pdf_url(cert_url)
             cert = cert_url
 
-        # Monta um PortariaData mínimo para passar ao download_certified_pdf
+        # Monta PortariaData mínimo
         pdata = pf.PortariaData(numero=numero, ano=ano)
         pdata.dou_cert_url = cert or ""
-        pdata.dou_pdf_servlet_url = servlet
+        pdata.dou_pdf_servlet_url = servlet or ""
 
-        # Caminho onde salvar o PDF (mesma convenção do gerador)
+        # Caminho onde salvar o PDF
         pdf_name = f"{ano}.Portaria-CNMP-PRESI.{numero}-DOU-certificada.pdf"
         pdf_path = os.path.join(OUTPUT_DIR, pdf_name)
 
-        res = dou.download_certified_pdf(pdata, pdf_path)
-        if res:
-            with JOBS_LOCK:
-                job = JOBS.get(job_id)
-                job["result"]["dou_cert_url"] = cert or pdata.dou_cert_url
-                job["result"]["dou_pdf_servlet_url"] = servlet
-                job["result"]["pdf_path"] = pdf_path
-                job["log"].append(f"PDF certificado baixado manualmente: {pdf_path}")
-            return jsonify({"ok": True, "pdf_path": pdf_path})
-        else:
-            with JOBS_LOCK:
-                job = JOBS.get(job_id)
-                job["log"].append("Falha ao baixar PDF usando a URL fornecida.")
-            return jsonify({"error": "falha ao baixar o PDF com a URL fornecida."}), 500
+        # Baixa o PDF
+        res_pdf = dou.download_certified_pdf(pdata, pdf_path)
+        if not res_pdf:
+            return jsonify({"error": "Falha ao baixar o PDF certificado."}), 500
 
-    except Exception as exc:  # noqa: BLE001
+        # Tenta extrair texto do PDF para preencher título/corpo (melhora o .docx)
+        texto = pf.DOUClient.extract_pdf_text(pdf_path)
+        if texto:
+            parsed = pf.parse_portaria_text(texto, numero, ano)
+            pdata.titulo = parsed.get("titulo") or pdata.titulo
+            pdata.ementa = parsed.get("ementa", "")
+            pdata.preambulo = parsed.get("preambulo", "")
+            pdata.corpo = parsed.get("corpo", [])
+            pdata.assinaturas = parsed.get("assinaturas", [])
+            pdata.cargos = parsed.get("cargos", [])
+            pdata.fonte_texto = "DOU-PDF"
+
+        # Re-gera o .docx usando o template (garante que o título terá o link correto)
+        builder = pf.PortariaDocBuilder(pf.TEMPLATE_PATH, cnmp)
+        builder.build(pdata)
+        docx_name = f"{ano}.Portaria-CNMP-PRESI.{numero}.docx"
+        docx_path = os.path.join(OUTPUT_DIR, docx_name)
+        builder.save(docx_path)
+
+        # Atualiza o job em memória
         with JOBS_LOCK:
             job = JOBS.get(job_id)
-            if job:
-                job["log"].append("ERRO ao baixar PDF com url manual: " + str(exc))
-        return jsonify({"error": str(exc)}), 500
+            if job.get("result") is None:
+                job["result"] = {}
+            job["result"].update({
+                "dou_cert_url": pdata.dou_cert_url,
+                "dou_pdf_servlet_url": pdata.dou_pdf_servlet_url,
+                "dou_page_url": pdata.dou_page_url,
+                "pdf_path": pdf_path,
+                "docx_path": docx_path,
+            })
+
+        return jsonify({"ok": True, "pdf_path": pdf_path, "docx_path": docx_path})
+
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        log(f"attach_cert_url: exceção: {exc}\n{tb}")
+        return jsonify({"error": "erro interno ao anexar a URL do DOU."}), 500
