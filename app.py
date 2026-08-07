@@ -171,7 +171,8 @@ def attach_cert_url():
     Recebe JSON/form com: job_id, cert_url
     Baixa o PDF certificado, tenta extrair/parsear texto, MAS só substitui
     o texto do job se a extração do DOU for realmente válida para a portaria
-    solicitada. Regera o .docx e atualiza o JOB.
+    solicitada. Se a extração for inválida, preserva o .docx existente (se houver)
+    e atualiza apenas os links/paths.
     """
     data_in = request.get_json(silent=True) or request.form
     job_id = data_in.get("job_id")
@@ -224,17 +225,17 @@ def attach_cert_url():
                 parsed_num = int(m.group(1))
         # número deve bater com o solicitado; caso contrário, descartamos parsed
         if parsed and parsed_num != numero:
-            log(f"attach_cert_url: parsed encontrado, mas título refere-se a nº {parsed_num} (esperado {numero}) -> descartando parsed DOU.")
+            log(f"attach_cert_url: parsed refere-se a nº {parsed_num} (esperado {numero}) -> descartando parsed DOU.")
             parsed = None
 
-        # contar parágrafos atuais / novos
+        # conta parágrafos atuais / novos (se tivermos contagem anterior)
         current_n_par = (current_result.get("n_paragrafos_corpo") or 0) if current_result else 0
         new_n_par = len(parsed["corpo"]) if parsed and parsed.get("corpo") else 0
 
         # Heurística de substituição:
         # - se não tínhamos texto antes (current_n_par == 0) e novo tem >=1 -> replace
         # - ou se novo tem >= current_n_par (não piora) e tem pelo menos 1 par -> replace
-        # - jamais substituir quando não houver matched number (parsed is None)
+        # - jamais substituir quando parsed é None
         replace_text = False
         if parsed and new_n_par >= 1 and (current_n_par == 0 or new_n_par >= current_n_par):
             replace_text = True
@@ -249,68 +250,85 @@ def attach_cert_url():
             pdata.assinaturas = parsed.get("assinaturas", [])
             pdata.cargos = parsed.get("cargos", [])
             pdata.fonte_texto = "DOU-PDF"
+
+            builder = pf.PortariaDocBuilder(pf.TEMPLATE_PATH, cnmp)
+            builder.build(pdata)
+            docx_name = f"{ano}.Portaria-CNMP-PRESI.{numero}.docx"
+            docx_path = os.path.join(OUTPUT_DIR, docx_name)
+            builder.save(docx_path)
+
         else:
-            # preserva o texto já disponível (ex.: extraído do CNMP)
-            if current_result:
-                # tenta reaproveitar os campos que já estavam no resultado
-                pdata.titulo = current_result.get("titulo") or pdata.titulo
-                pdata.ementa = current_result.get("ementa", "")
-                # Não sobrescrever corpo quando já existia e parsed não é confiável
-                pdata.corpo = []  # vazio aqui; o builder usará job["result"] ao reconstruir
-                pdata.assinaturas = current_result.get("assinaturas", []) or []
-                pdata.cargos = current_result.get("cargos", []) or []
-                pdata.fonte_texto = current_result.get("fonte_texto") or ""
+            # Não substituímos: PRESERVAR o .docx existente se houver.
+            # Caso exista um .docx gerado antes, reidratamos o corpo a partir dele
+            # e re-geramos o .docx apenas para atualizar o link/título (opcional).
+            docx_path = current_result.get("docx_path")
+            if docx_path and os.path.exists(docx_path):
+                try:
+                    # leitura leve do .docx existente para extrair parágrafos do corpo
+                    from docx import Document as DocxDocument
+                    doc = DocxDocument(docx_path)
+                    corpo = []
+                    for p in doc.paragraphs:
+                        txt = (p.text or "").strip()
+                        if not txt:
+                            continue
+                        low = txt.lower()
+                        if low.startswith("brasilia") or low.startswith("brasília"):
+                            break
+                        # tenta detectar parágrafos de corpo pelo nome do estilo
+                        style_name = ""
+                        try:
+                            style_name = p.style.name or ""
+                        except Exception:
+                            style_name = ""
+                        if style_name and style_name == pf.STYLE_CORPO:
+                            corpo.append(txt)
+                    if corpo:
+                        pdata.corpo = corpo
+                    # título: prefira o título presente no resultado anterior
+                    pdata.titulo = current_result.get("titulo") or pdata.titulo
+                    pdata.ementa = current_result.get("ementa", "") or pdata.ementa
+                    pdata.assinaturas = current_result.get("assinaturas") or pdata.assinaturas
+                    # re-gera o .docx para atualizar o link do título (segurança)
+                    builder = pf.PortariaDocBuilder(pf.TEMPLATE_PATH, cnmp)
+                    builder.build(pdata)
+                    docx_name = f"{ano}.Portaria-CNMP-PRESI.{numero}.docx"
+                    docx_path = os.path.join(OUTPUT_DIR, docx_name)
+                    builder.save(docx_path)
+                except Exception as exc_doc:
+                    # se algo falhar ao reidratar, não removemos o .docx antigo:
+                    log(f"attach_cert_url: falha ao reidratar docx existente: {exc_doc}")
+                    docx_path = current_result.get("docx_path")
             else:
-                # nada disponível: aceita parsed mesmo que seja frágil
+                # sem docx existente: se parsed for válido aceitar parsed
                 if parsed:
                     pdata.titulo = parsed.get("titulo") or pdata.titulo
+                    pdata.ementa = parsed.get("ementa", "")
+                    pdata.preambulo = parsed.get("preambulo", "")
                     pdata.corpo = parsed.get("corpo", [])
                     pdata.assinaturas = parsed.get("assinaturas", [])
                     pdata.cargos = parsed.get("cargos", [])
                     pdata.fonte_texto = "DOU-PDF"
-
-        # Atualiza urls no pdata
-        pdata.dou_cert_url = cert or pdata.dou_cert_url
-        pdata.dou_pdf_servlet_url = servlet or pdata.dou_pdf_servlet_url
-
-        # Regera o .docx: se NÃO substituímos o corpo, precisamos reconstruir usando o
-        # conteúdo já presente no job["result"] (para preservar o texto bom).
-        builder = pf.PortariaDocBuilder(pf.TEMPLATE_PATH, cnmp)
-        # Se não replace_text e result continha corpo/ementa, preencher pdata a partir dele:
-        if not replace_text and current_result:
-            # tenta recuperar corpo/ementa do resultado atual (caso o gerador anterior tenha salvo)
-            prev_docx = current_result.get("docx_path")
-            # prefira usar os campos simples do result (se existirem)
-            if current_result.get("n_paragrafos_corpo", 0) > 0:
-                # recupera campo título/ementa/assinaturas já disponíveis
-                pdata.titulo = current_result.get("titulo") or pdata.titulo
-                pdata.ementa = current_result.get("ementa", "")
-                # caso o resultado anterior tenha sido gerado com PortariaData, os campos
-                # já estariam em job["result"]; senão, preservamos o que há.
-                # NOTA: se você mantiver no future o corpo serializado em job["result"],
-                # aqui podemos re-hidratar.
-            else:
-                # sem corpo anterior: se parsed existir, use-o (fall-back)
-                if parsed:
-                    pdata.corpo = parsed.get("corpo", [])
-
-        # build e save (sempre re-gera o docx para atualizar o link do título)
-        builder.build(pdata)
-        docx_name = f"{ano}.Portaria-CNMP-PRESI.{numero}.docx"
-        docx_path = os.path.join(OUTPUT_DIR, docx_name)
-        builder.save(docx_path)
+                    builder = pf.PortariaDocBuilder(pf.TEMPLATE_PATH, cnmp)
+                    builder.build(pdata)
+                    docx_name = f"{ano}.Portaria-CNMP-PRESI.{numero}.docx"
+                    docx_path = os.path.join(OUTPUT_DIR, docx_name)
+                    builder.save(docx_path)
+                else:
+                    # nada para re-gerar: mantemos docx_path como estava (pode ser None)
+                    docx_path = current_result.get("docx_path")
 
         # Atualiza o JOB com os novos caminhos / links (sem apagar outras chaves)
         with JOBS_LOCK:
             job = JOBS.get(job_id)
             if job.get("result") is None:
                 job["result"] = {}
-            # atualiza n_paragrafos_corpo: se substituímos, new_n_par, senão mantém o antigo
             job["result"].update({
                 "dou_cert_url": pdata.dou_cert_url,
                 "dou_pdf_servlet_url": pdata.dou_pdf_servlet_url,
                 "pdf_path": pdf_path,
                 "docx_path": docx_path,
+                # atualiza contagem apenas se substituímos
                 "n_paragrafos_corpo": new_n_par if replace_text else (current_result.get("n_paragrafos_corpo") or 0),
                 "fonte_texto": pdata.fonte_texto or current_result.get("fonte_texto"),
             })
