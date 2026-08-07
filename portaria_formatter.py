@@ -261,50 +261,87 @@ class DOUClient:
     LEITURA_URL = "https://www.in.gov.br/leiturajornal"
 
     def find_via_leiturajornal(self, numero: int, ano: int, pub_date: str,
-                               secao: int) -> Optional[dict]:
-        """Localiza a portaria no índice completo do DOU (leiturajornal).
+                secao: int) -> Optional[dict]:
+    """Localiza a portaria no índice completo do DOU (leiturajornal).
 
-        Diferente da busca textual do in.gov.br (que é incompleta para 2026),
-        o leiturajornal lista TODAS as matérias de uma edição/seção. A partir
-        dele obtemos o ``urlTitle`` e, principalmente, a PÁGINA no DOU
-        (``numberPage``), necessária para montar o link da versão certificada.
+    Tenta várias heurísticas para extrair o `jsonArray` (a página usa JSON
+    embutido) e, se falhar, faz uma busca por padrões textuais na página.
+    """
+    if not pub_date or not secao:
+        return None
+    d = pub_date.replace("/", "-")
+    url = f"{self.LEITURA_URL}?data={d}&secao=do{secao}"
 
-        ``pub_date`` no formato ``DD/MM/AAAA``; ``secao`` = 1, 2 ou 3.
-        Retorna o item (dict) do jsonArray, ou ``None``.
-        """
-        if not pub_date or not secao:
-            return None
-        d = pub_date.replace("/", "-")
-        url = f"{self.LEITURA_URL}?data={d}&secao=do{secao}"
-        # A edição pode ser grande (vários MB) e o in.gov.br devolve 502
-        # transitórios; leitura longa + algumas tentativas.
-        r = get_with_retry(self.session, url, timeout=(15, 120), attempts=4)
-        if r is None or r.status_code != 200:
-            self.server_error = True
-            log(f"DOU: falha no leiturajornal ({url}).")
-            return None
-        m = re.search(
-            r'<script id="params" type="application/json">(.*?)</script>',
-            r.text, re.DOTALL,
-        )
-        if not m:
-            return None
-        import json
+    # leitura com mais tentativas / timeout maior para leiturajornal (páginas grandes)
+    r = get_with_retry(self.session, url, timeout=(15, 120), attempts=6)
+    if r is None or r.status_code != 200:
+        self.server_error = True
+        log(f"DOU: falha no leiturajornal ({url}).")
+        return None
+
+    html = r.text
+
+    # 1) tentar extrair JSON embutido por vários padrões (mais tolerante)
+    import json
+    json_candidates = []
+
+    # padrão original: <script id="params" ...> ... </script>
+    m = re.search(r'<script[^>]*id=["\']params["\'][^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
+    if m:
+        json_candidates.append(m.group(1))
+
+    # procurar por qualquer script que contenha "jsonArray"
+    for m2 in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE):
+        body = m2.group(1)
+        if "jsonArray" in body:
+            json_candidates.append(body)
+
+    # fallback: procurar bloco {... "jsonArray" ...}
+    if not json_candidates:
+        m3 = re.search(r'(\{.*"jsonArray".*?\})', html, re.DOTALL)
+        if m3:
+            json_candidates.append(m3.group(1))
+
+    obj = None
+    for cand in json_candidates:
         try:
-            obj = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            return None
+            obj = json.loads(cand)
+            break
+        except Exception:
+            # tentar extrair apenas o objeto entre first { and last }
+            try:
+                start = cand.find("{")
+                end = cand.rfind("}") + 1
+                obj = json.loads(cand[start:end])
+                break
+            except Exception:
+                continue
+
+    if obj:
         for it in obj.get("jsonArray", []) or []:
-            title = strip_accents_upper(
-                re.sub(r"<[^>]+>", "", it.get("title", "") or ""))
+            title = strip_accents_upper(re.sub(r"<[^>]+>", "", it.get("title", "") or ""))
             if "CNMP-PRESI" not in title:
                 continue
             mn = re.search(r"N[°ºO]\s*(\d+)", title)
             if mn and int(mn.group(1)) == int(numero):
-                log(f"DOU: portaria localizada no leiturajornal "
-                    f"(página {it.get('numberPage')}, {it.get('pubName')}).")
+                log(f"DOU: portaria localizada no leiturajornal (página {it.get('numberPage')}, {it.get('pubName')}).")
                 return it
-        return None
+
+    # se não encontramos por JSON, tentar heurística textual: procurar "numberPage" + title no HTML
+    # captura trechos que contenham numberPage e title próximos
+    for m in re.finditer(r'"numberPage"\s*:\s*(\d+).*?"title"\s*:\s*"(.*?)"', html, re.DOTALL):
+        page = int(m.group(1))
+        title = strip_accents_upper(re.sub(r"<[^>]+>", "", m.group(2) or ""))
+        if "CNMP-PRESI" not in title:
+            continue
+        mn = re.search(r"N[°ºO]\s*(\d+)", title)
+        if mn and int(mn.group(1)) == int(numero):
+            # construir um item coerente com o que a função espera
+            log(f"DOU: portaria localizada por fallback textual no leiturajornal (página {page}).")
+            return {"numberPage": page, "pubName": pub_date, "title": title}
+
+    # ainda nada
+    return None
 
     def build_cert_urls(self, pub_date: str, secao: int, pagina) -> tuple:
         """Monta (cert_url, servlet_pdf_url) da versão certificada do DOU."""
@@ -318,47 +355,72 @@ class DOUClient:
 
     # -- página da matéria ------------------------------------------------- #
     def fetch_materia(self, item: dict, data: PortariaData, *,
-                      only_cert: bool = False) -> None:
-        """Extrai o conteúdo da página da matéria e localiza a versão certificada.
+                only_cert: bool = False) -> None:
+    """Extrai o conteúdo da página da matéria e localiza a versão certificada.
 
-        Se ``only_cert`` for True, apenas o título (epígrafe) e o link da versão
-        certificada são atualizados; o corpo/preâmbulo/assinaturas já obtidos de
-        outra fonte (PDF do CNMP) são preservados.
-        """
-        url_title = item.get("urlTitle")
-        page_url = self.MATERIA_URL.format(url_title=url_title)
-        data.dou_page_url = page_url
-        data.pub_date = item.get("pubDate", "")
-        r = get_with_retry(self.session, page_url, timeout=40)
-        if r is None or r.status_code != 200:
-            self.server_error = True
-            log("DOU: falha ao carregar a página da matéria.")
-            return
-        soup = BeautifulSoup(r.text, "lxml")
+    Resolve links relativos e procura anchors que contenham o servlet/visualiza
+    ou a palavra 'certificad' no texto do link (mais tolerante).
+    """
+    url_title = item.get("urlTitle")
+    page_url = self.MATERIA_URL.format(url_title=url_title)
+    data.dou_page_url = page_url
+    data.pub_date = item.get("pubDate", "")
+    r = get_with_retry(self.session, page_url, timeout=40)
+    if r is None or r.status_code != 200:
+        self.server_error = True
+        log("DOU: falha ao carregar a página da matéria.")
+        return
+    soup = BeautifulSoup(r.text, "lxml")
 
-        # Título / epígrafe (autoritativo no DOU)
-        ident = soup.find(class_="identifica")
-        if ident:
-            data.titulo = self._normalize_titulo(ident.get_text(" ", strip=True))
+    # Título / epígrafe (autoritativo no DOU)
+    ident = soup.find(class_="identifica")
+    if ident:
+        data.titulo = self._normalize_titulo(ident.get_text(" ", strip=True))
 
-        if not only_cert:
-            # Ementa (opcional)
-            ementa = soup.find(class_="ementa")
-            if ementa:
-                data.ementa = ementa.get_text(" ", strip=True)
+    if not only_cert:
+        # Ementa (opcional)
+        ementa = soup.find(class_="ementa")
+        if ementa:
+            data.ementa = ementa.get_text(" ", strip=True)
 
-            # Parágrafos do corpo (preâmbulo + artigos)
-            paras = [p.get_text(" ", strip=True) for p in soup.find_all(class_="dou-paragraph")]
-            paras = [p for p in paras if p]
-            if paras:
-                data.preambulo = paras[0]
-                data.corpo = paras[1:]
+        # Parágrafos do corpo (preâmbulo + artigos)
+        paras = [p.get_text(" ", strip=True) for p in soup.find_all(class_="dou-paragraph")]
+        paras = [p for p in paras if p]
+        if paras:
+            data.preambulo = paras[0]
+            data.corpo = paras[1:]
 
-            # Assinaturas e cargos
-            data.assinaturas = [a.get_text(" ", strip=True)
-                                for a in soup.find_all(class_="assina") if a.get_text(strip=True)]
-            data.cargos = [c.get_text(" ", strip=True)
-                           for c in soup.find_all(class_="cargo") if c.get_text(strip=True)]
+        # Assinaturas e cargos
+        data.assinaturas = [a.get_text(" ", strip=True)
+                for a in soup.find_all(class_="assina") if a.get_text(strip=True)]
+        data.cargos = [c.get_text(" ", strip=True)
+                for c in soup.find_all(class_="cargo") if c.get_text(strip=True)]
+
+    # Link da versão certificada: resolver relativenes e procurar por vários padrões
+    cert_url = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        txt = strip_accents_upper(a.get_text(" ", strip=True))
+        full = urllib.parse.urljoin(page_url, href)
+        if "pesquisa.in.gov.br" in full and ("visualiza" in full or "INPDFViewer" in full or "CERTIFICAD" in txt):
+            cert_url = full
+            break
+
+    # se não encontrou, procurar anchors que contenham 'pesquisa.in.gov.br' mesmo sem visualiza no href
+    if not cert_url:
+        for a in soup.find_all("a", href=True):
+            full = urllib.parse.urljoin(page_url, a["href"])
+            if "pesquisa.in.gov.br" in full:
+                cert_url = full
+                break
+
+    if cert_url:
+        data.publicado_dou = True
+        data.dou_cert_url = cert_url
+        data.dou_pdf_servlet_url = self._build_pdf_url(cert_url)
+        log(f"DOU: página da matéria e versão certificada localizadas (com link certificado).")
+    else:
+        log("DOU: página da matéria carregada, mas NÃO foi encontrado link certificado na página.")
 
         # Link da versão certificada
         cert_url = None
