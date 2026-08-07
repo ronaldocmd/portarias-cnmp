@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 portaria_formatter.py
-=====================
+====
 
 Automação completa para gerar Portarias da Presidência do CNMP formatadas
 conforme o padrão institucional (Manual de padronização de atos do CNMP).
@@ -59,9 +59,9 @@ from docx.text.paragraph import Paragraph
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Configurações gerais
-# --------------------------------------------------------------------------- #
+# ---- #
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PATH = os.path.join(HERE, "template_model.docx")
@@ -76,7 +76,7 @@ HEADERS = {"User-Agent": USER_AGENT, "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8
 # Cores
 COLOR_LINK_BLUE = "0563C1"   # azul padrão de hyperlink do Word / template
 COLOR_CNMP_RED = "EE0000"    # vermelho usado quando publicada no Diário Eletrônico do CNMP
-COLOR_BLACK = "000000"
+COLOR_BLACK = "0000"
 
 # Categorias de atos no portal do CNMP (atos-e-normas)
 CNMP_CATEGORIES = {
@@ -142,17 +142,17 @@ def strip_accents_upper(text: str) -> str:
 
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Estruturas de dados
-# --------------------------------------------------------------------------- #
+# ---- #
 
 @dataclass
 class PortariaData:
     """Conteúdo extraído de uma portaria."""
     numero: int
     ano: int
-    titulo: str = ""                       # epígrafe (ex.: "PORTARIA CNMP-PRESI N° 164 DE 28 DE MAIO DE 2026")
-    ementa: str = ""                       # opcional ("Dispõe sobre ...")
+    titulo: str = ""                    # epígrafe (ex.: "PORTARIA CNMP-PRESI N° 164 DE 28 DE MAIO DE 2026")
+    ementa: str = ""                    # opcional ("Dispõe sobre ...")
     notas: List[str] = field(default_factory=list)  # avisos "Vide/Revogada" após o título
     preambulo: str = ""                    # parágrafo que termina em RESOLVE:
     corpo: List[str] = field(default_factory=list)   # artigos / parágrafos
@@ -163,7 +163,7 @@ class PortariaData:
     dou_page_url: str = ""                 # página da matéria no in.gov.br
     dou_cert_url: str = ""                 # página web da versão certificada
     dou_pdf_servlet_url: str = ""          # URL do PDF certificado (servlet)
-    pub_date: str = ""                     # dd/mm/aaaa da publicação no DOU
+    pub_date: str = ""                    # dd/mm/aaaa da publicação no DOU
     dou_indisponivel: bool = False         # True se a busca do DOU falhou por erro de servidor
     dou_link_impreciso: bool = False       # link aponta para a edição (não a página exata)
     # CNMP
@@ -173,9 +173,9 @@ class PortariaData:
     fonte_texto: str = ""                  # de onde veio o texto: "CNMP-PDF" | "DOU-HTML" | ""
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Cliente do DOU (in.gov.br)
-# --------------------------------------------------------------------------- #
+# ---- #
 
 class DOUClient:
     """Busca e extração de portarias publicadas no Diário Oficial da União."""
@@ -188,7 +188,7 @@ class DOUClient:
         self.session = session or make_session()
         self.server_error = False   # True se o in.gov.br falhou por erro de servidor
 
-    # -- busca ------------------------------------------------------------- #
+    # -- busca ---- #
     def _raw_search(self, query: str) -> List[dict]:
         params = {
             "q": query,
@@ -200,7 +200,7 @@ class DOUClient:
         # A busca do in.gov.br sofre 502 transitórios; como o resultado define a
         # cor/link do título, vale a pena insistir um pouco mais aqui.
         r = get_with_retry(self.session, self.SEARCH_URL, params=params,
-                           timeout=25, attempts=4)
+                    timeout=25, attempts=4)
         if r is None or r.status_code != 200:
             self.server_error = True
             log(f"Falha na busca do DOU (query={query!r}).")
@@ -227,9 +227,15 @@ class DOUClient:
     def find(self, numero: int, ano: int) -> Optional[dict]:
         """Localiza a entrada do DOU correspondente à portaria numero/ano."""
         self.server_error = False
+        # gerar variações resilientes da query (N°, Nº, N., sem acentos)
+        base = f"PORTARIA CNMP-PRESI {numero} {ano}"
         queries = [
             f'"PORTARIA CNMP-PRESI N° {numero}"',
-            f'PORTARIA CNMP-PRESI {numero} {ano}',
+            f'"PORTARIA CNMP-PRESI Nº {numero}"',
+            f'"PORTARIA CNMP-PRESI N. {numero}"',
+            base,
+            strip_accents_upper(base),
+            base.replace("N°", "N").replace("º", "o"),
         ]
         seen = set()
         for q in queries:
@@ -255,13 +261,13 @@ class DOUClient:
                 return item
         return None
 
-    # -- leiturajornal (índice completo do DOU por edição/seção) ---------- #
+    # -- leiturajornal (índice completo do DOU por edição/seção) ---- #
     # Códigos de "jornal" usados pelo pesquisa.in.gov.br por seção do DOU.
     JORNAL_POR_SECAO = {1: 515, 2: 529, 3: 530}
     LEITURA_URL = "https://www.in.gov.br/leiturajornal"
 
     def find_via_leiturajornal(self, numero: int, ano: int, pub_date: str,
-                               secao: int) -> Optional[dict]:
+                    secao: int) -> Optional[dict]:
         """Localiza a portaria no índice completo do DOU (leiturajornal).
 
         Diferente da busca textual do in.gov.br (que é incompleta para 2026),
@@ -301,6 +307,13 @@ class DOUClient:
                 continue
             mn = re.search(r"N[°ºO]\s*(\d+)", title)
             if mn and int(mn.group(1)) == int(numero):
+                # tenta garantir que o item tenha numberPage; se não, tenta extrair
+                if not it.get("numberPage"):
+                    # algumas versões trazem a página em 'url' ou 'link'
+                    u = it.get("urlTitle") or it.get("url") or ""
+                    mpage = re.search(r"pagina=(\d+)", str(u))
+                    if mpage:
+                        it["numberPage"] = mpage.group(1)
                 log(f"DOU: portaria localizada no leiturajornal "
                     f"(página {it.get('numberPage')}, {it.get('pubName')}).")
                 return it
@@ -316,9 +329,9 @@ class DOUClient:
                    f"&captchafield=firstAccess")
         return cert, servlet
 
-    # -- página da matéria ------------------------------------------------- #
+    # -- página da matéria ---- #
     def fetch_materia(self, item: dict, data: PortariaData, *,
-                      only_cert: bool = False) -> None:
+                    only_cert: bool = False) -> None:
         """Extrai o conteúdo da página da matéria e localiza a versão certificada.
 
         Se ``only_cert`` for True, apenas o título (epígrafe) e o link da versão
@@ -356,18 +369,29 @@ class DOUClient:
 
             # Assinaturas e cargos
             data.assinaturas = [a.get_text(" ", strip=True)
-                                for a in soup.find_all(class_="assina") if a.get_text(strip=True)]
+                    for a in soup.find_all(class_="assina") if a.get_text(strip=True)]
             data.cargos = [c.get_text(" ", strip=True)
-                           for c in soup.find_all(class_="cargo") if c.get_text(strip=True)]
+                    for c in soup.find_all(class_="cargo") if c.get_text(strip=True)]
 
         # Link da versão certificada
         cert_url = None
+        # 1) procura por links diretos 'visualiza' ou texto 'certific' no texto do link
         for a in soup.find_all("a", href=True):
             href = a["href"]
             txt = strip_accents_upper(a.get_text(" ", strip=True))
             if "pesquisa.in.gov.br" in href and ("visualiza" in href or "CERTIFICAD" in txt):
                 cert_url = href
                 break
+        # 2) se não achou, procura por data-attributes ou botões que chamam a visualização
+        if not cert_url:
+            for tag in soup.find_all(attrs=True):
+                for k, v in tag.attrs.items():
+                    if isinstance(v, str) and "visualiza" in v and "pesquisa.in.gov.br" in v:
+                        cert_url = v
+                        break
+                if cert_url:
+                    break
+        # 3) último recurso: procurar qualquer href para pesquisa.in.gov.br e usar
         if not cert_url:
             for a in soup.find_all("a", href=True):
                 if "pesquisa.in.gov.br" in a["href"]:
@@ -389,39 +413,74 @@ class DOUClient:
 
     @staticmethod
     def _build_pdf_url(cert_url: str) -> str:
-        """Constrói a URL do servlet do PDF a partir da URL 'visualiza'."""
         parsed = urllib.parse.urlparse(cert_url)
         qs = urllib.parse.parse_qs(parsed.query)
         jornal = qs.get("jornal", [""])[0]
         pagina = qs.get("pagina", [""])[0]
         data_ = qs.get("data", [""])[0]
+        # se pagina vazia, tenta extrair pattern '/pagina/NN' ou 'pagina=NN' no caminho
+        if not pagina:
+            m = re.search(r"[?&]pagina=(\d+)", cert_url)
+            if m:
+                pagina = m.group(1)
+            else:
+                m2 = re.search(r"/pagina/(\d+)", cert_url)
+                if m2:
+                    pagina = m2.group(1)
         base = f"{parsed.scheme}://{parsed.netloc}"
+        if not pagina:
+            # sem página não é possível montar servlet confiável; retorna a página certificada
+            return cert_url
         return (f"{base}/imprensa/servlet/INPDFViewer?jornal={jornal}"
                 f"&pagina={pagina}&data={data_}&captchafield=firstAccess")
 
-    # -- download do PDF certificado -------------------------------------- #
+    # -- download do PDF certificado ---- #
     def download_certified_pdf(self, data: PortariaData, dest_path: str) -> Optional[str]:
         if not data.dou_pdf_servlet_url:
             log("DOU: sem URL de PDF certificado para baixar.")
             return None
-        r = get_with_retry(
-            self.session, data.dou_pdf_servlet_url,
-            headers={"Referer": data.dou_cert_url}, timeout=90, attempts=4,
-        )
-        if r is None or r.status_code != 200:
-            log("DOU: falha ao baixar PDF certificado.")
-            return None
-        if r.content[:4] != b"%PDF":
-            log("DOU: resposta do servlet não é um PDF válido.")
-            return None
-        with open(dest_path, "wb") as fh:
-            fh.write(r.content)
-        log(f"DOU: PDF certificado salvo em {dest_path} ({len(r.content)} bytes).")
-        return dest_path
+        # primeira tentativa: servlet
+        urls_to_try = [data.dou_pdf_servlet_url]
+        # também tenta a página certificada direta (às vezes tem link direto para PDF)
+        if data.dou_cert_url and data.dou_cert_url not in urls_to_try:
+            urls_to_try.append(data.dou_cert_url)
+        for url in urls_to_try:
+            r = get_with_retry(
+                self.session, url,
+                headers={"Referer": data.dou_cert_url}, timeout=90, attempts=4,
+            )
+            if r is None or r.status_code != 200:
+                log(f"DOU: tentativa de baixar {url} falhou (status {getattr(r,'status_code',None)}).")
+                continue
+            content = r.content
+            # se a resposta for HTML que contém link para servlet/pdf, tenta extrair
+            if content[:4] != b"%PDF":
+                txt = r.text or ""
+                m = re.search(r"(https?://[^\s\"']+INPDFViewer[^\s\"']+)", txt, re.IGNORECASE)
+                if m:
+                    pdf_url = m.group(1)
+                    r2 = get_with_retry(self.session, pdf_url, timeout=90, attempts=3)
+                    if r2 is not None and r2.status_code == 200 and r2.content[:4] == b"%PDF":
+                        content = r2.content
+                        url = pdf_url
+                    else:
+                        continue
+                else:
+                    continue
+            # valida PDF
+            if content[:4] != b"%PDF":
+                log("DOU: resposta não é PDF válido.")
+                continue
+            with open(dest_path, "wb") as fh:
+                fh.write(content)
+            log(f"DOU: PDF certificado salvo em {dest_path} ({len(content)} bytes).")
+            return dest_path
+        log("DOU: falha ao baixar PDF certificado.")
+        return None
 
 
 
-    # -- extração de texto do PDF certificado (fallback) ------------------- #
+    # -- extração de texto do PDF certificado (fallback) ---- #
     @staticmethod
     def extract_pdf_text(pdf_path: str) -> str:
         """Extrai o texto completo do PDF (fallback, caso a página web falhe)."""
@@ -439,9 +498,9 @@ class DOUClient:
         return "\n".join(parts)
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Cliente do portal do CNMP (atos-e-normas)
-# --------------------------------------------------------------------------- #
+# ---- #
 
 class CNMPClient:
     """Busca de links de normas no portal do CNMP."""
@@ -471,7 +530,7 @@ class CNMPClient:
         }
         url = None
         r = get_with_retry(self.session, self.BUSCA_URL, params=params,
-                           timeout=40, verify=False)
+                    timeout=40, verify=False)
         if r is not None and r.status_code == 200:
             url = self._parse_results(r.text, numero, ano)
         else:
@@ -556,7 +615,7 @@ class CNMPClient:
             "publicacao": campo,
         }
 
-    # -- PDF da portaria (fonte primária e confiável de texto) ------------- #
+    # -- PDF da portaria (fonte primária e confiável de texto) ---- #
     PDF_URL_TEMPLATE = (
         "https://www.cnmp.mp.br/portal/images/Portarias_Presidencia_nova_versao/"
         "{ano}/{ano}.Portaria-CNMP-PRESI.{num:03d}.pdf"
@@ -584,7 +643,7 @@ class CNMPClient:
                 log(f"CNMP: PDF da portaria localizado ({url}).")
                 if dest_path:
                     with open(dest_path, "wb") as fh:
-                        fh.write(r.content)
+                    fh.write(r.content)
                 return r.content, url
         log(f"CNMP: PDF da portaria {numero}/{ano} não localizado no portal.")
         return None, None
@@ -607,9 +666,9 @@ class CNMPClient:
             return None, url
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Parsing do texto da portaria (a partir do PDF do CNMP)
-# --------------------------------------------------------------------------- #
+# ---- #
 
 _HEADER_LINE = "CONSELHO NACIONAL DO MINISTERIO PUBLICO"
 _TITLE_RE = re.compile(r"PORTARIA\s+CNMP-PRESI\s+N", re.IGNORECASE)
@@ -782,9 +841,9 @@ def parse_portaria_text(text: str, numero: int, ano: int) -> dict:
     return out
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Detecção de menções a portarias no corpo do texto
-# --------------------------------------------------------------------------- #
+# ---- #
 
 # Ex.: "Portaria CNMP-PRESI nº 71/2026", "Portaria CNMP-PRESI n° 71, de 3 de ... de 2026",
 #      "Portaria CNMP-CN nº 95, de 19 de maio de 2026"
@@ -859,9 +918,9 @@ def build_segments(text: str,
 
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Construtor do .docx
-# --------------------------------------------------------------------------- #
+# ---- #
 
 # Estilos (ids) presentes no modelo institucional
 STYLE_CABECALHO = "CabealhoPresi"   # "Cabeçalho Presi"
@@ -887,7 +946,7 @@ class PortariaDocBuilder:
         self.body = self.doc.element.body
         self.sectPr = self.body.find(qn("w:sectPr"))
 
-    # -- infraestrutura de parágrafos ------------------------------------- #
+    # -- infraestrutura de parágrafos ---- #
     def _new_paragraph(self, style_id: Optional[str] = None) -> Paragraph:
         """Cria um <w:p> imediatamente antes do sectPr e devolve o Paragraph."""
         p = OxmlElement("w:p")
@@ -904,7 +963,7 @@ class PortariaDocBuilder:
                 continue
             self.body.remove(child)
 
-    # -- propriedades de run ---------------------------------------------- #
+    # -- propriedades de run ---- #
     @staticmethod
     def _tnr_rpr(run_el, *, color=COLOR_BLACK, bold=False, link=False):
         """Aplica as propriedades de run (Times New Roman, cor, negrito, link)."""
@@ -925,7 +984,7 @@ class PortariaDocBuilder:
         return rpr
 
     def _add_text_run(self, para: Paragraph, text: str, *, color=COLOR_BLACK,
-                      bold=False):
+                    bold=False):
         r = OxmlElement("w:r")
         self._tnr_rpr(r, color=color, bold=bold)
         t = OxmlElement("w:t")
@@ -936,7 +995,7 @@ class PortariaDocBuilder:
         return r
 
     def _add_hyperlink(self, para: Paragraph, text: str, url: str, *,
-                       bold=False):
+                    bold=False):
         """Adiciona um hyperlink externo (azul, sublinhado) ao parágrafo."""
         r_id = self.doc.part.relate_to(url, RT.HYPERLINK, is_external=True)
         hyper = OxmlElement("w:hyperlink")
@@ -958,7 +1017,7 @@ class PortariaDocBuilder:
             else:
                 self._add_text_run(para, seg.text, bold=seg.bold)
 
-    # -- parágrafos utilitários ------------------------------------------- #
+    # -- parágrafos utilitários ---- #
     def _blank_paragraph(self, first_line: Optional[int] = None):
         """Parágrafo em branco no formato usado pelo modelo (espaçamento 80)."""
         para = self._new_paragraph()
@@ -981,7 +1040,7 @@ class PortariaDocBuilder:
 
 
 
-    # -- título ------------------------------------------------------------ #
+    # -- título ---- #
     def _add_titulo(self, data: PortariaData):
         para = self._new_paragraph(STYLE_CABECALHO)
         if data.publicado_dou and data.dou_cert_url:
@@ -996,7 +1055,7 @@ class PortariaDocBuilder:
             self._add_text_run(para, data.titulo, color=COLOR_CNMP_RED)
         return para
 
-    # -- ementa ------------------------------------------------------------ #
+    # -- ementa ---- #
     def _add_ementa(self, texto: str):
         para = self._new_paragraph()
         ppr = para._p.get_or_add_pPr()
@@ -1007,7 +1066,7 @@ class PortariaDocBuilder:
         self._add_segments(para, segments)
         return para
 
-    # -- notas ("Vide" / "Revogada") -------------------------------------- #
+    # -- notas ("Vide" / "Revogada") ---- #
     def _add_nota(self, texto: str):
         """Nota informativa (ex.: '(Revogada pela Portaria ...)') abaixo do título."""
         para = self._new_paragraph()
@@ -1025,7 +1084,7 @@ class PortariaDocBuilder:
                 _set(rpr, "w:iCs")
         return para
 
-    # -- assinatura -------------------------------------------------------- #
+    # -- assinatura ---- #
     def _add_assinatura_nome(self, nome: str):
         para = self._new_paragraph()
         ppr = para._p.get_or_add_pPr()
@@ -1043,7 +1102,7 @@ class PortariaDocBuilder:
         self._add_text_run(para, cargo)
         return para
 
-    # -- rodapé (epígrafe) ------------------------------------------------- #
+    # -- rodapé (epígrafe) ---- #
     def _update_footer_epigrafe(self, titulo: str):
         """Atualiza a epígrafe exibida no rodapé das páginas seguintes."""
         try:
@@ -1069,7 +1128,7 @@ class PortariaDocBuilder:
                 log("Rodapé: epígrafe atualizada.")
                 return
 
-    # -- montagem completa ------------------------------------------------- #
+    # -- montagem completa ---- #
     @staticmethod
     def _normalize_resolve(preambulo: str) -> str:
         return re.sub(
@@ -1103,7 +1162,7 @@ class PortariaDocBuilder:
         if preambulo:
             para = self._new_paragraph(STYLE_CORPO)
             segments = build_segments(preambulo, self.cnmp,
-                                      bold_phrases=[PRESIDENTE_BOLD])
+                    bold_phrases=[PRESIDENTE_BOLD])
             self._add_segments(para, segments)
 
         # 4) corpo (artigos / parágrafos)
@@ -1137,9 +1196,9 @@ class PortariaDocBuilder:
 
 
 
-# --------------------------------------------------------------------------- #
+# ---- #
 # Orquestração
-# --------------------------------------------------------------------------- #
+# ---- #
 
 def gerar_portaria(numero: int, ano: int, *, template_path: str = TEMPLATE_PATH,
                    output_dir: str = OUTPUT_DIR) -> dict:
@@ -1199,22 +1258,30 @@ def gerar_portaria(numero: int, ano: int, *, template_path: str = TEMPLATE_PATH,
                 data.dou_pdf_servlet_url = servlet
                 if item.get("urlTitle"):
                     data.dou_page_url = DOUClient.MATERIA_URL.format(
-                        url_title=item["urlTitle"])
+                    url_title=item["urlTitle"])
                 log(f"DOU: versão certificada montada (seção {secao}, "
                     f"página {item['numberPage']}, {pub['pub_date']}).")
             else:
                 # Fallback 1: busca textual do in.gov.br (às vezes funciona).
                 fitem = dou.find(numero, ano)
                 if fitem:
-                    dou.fetch_materia(fitem, data, only_cert=True)
+                    # se fitem tiver numberPage use-a; senão, fetch_materia para tentar localizar cert
+                    if fitem.get("numberPage"):
+                        cert, servlet = dou.build_cert_urls(
+                            pub["pub_date"], secao, fitem["numberPage"])
+                        data.dou_cert_url = cert
+                        data.dou_pdf_servlet_url = servlet
+                        data.dou_page_url = DOUClient.MATERIA_URL.format(url_title=fitem.get("urlTitle"))
+                    else:
+                        dou.fetch_materia(fitem, data, only_cert=True)
                 # Fallback 2: link para a edição da seção (não a página exata).
                 if not data.dou_cert_url and pub["pub_date"]:
                     d = pub["pub_date"].replace("/", "-")
                     data.dou_cert_url = (f"{DOUClient.LEITURA_URL}"
-                                         f"?data={d}&secao=do{secao}")
+                    f"?data={d}&secao=do{secao}")
                     data.dou_link_impreciso = True
                     log("DOU: página exata indisponível no momento; o link do "
-                        "título aponta para a edição da seção no DOU.")
+                    "título aponta para a edição da seção no DOU.")
         else:
             # Publicada apenas no Diário Eletrônico do CNMP → vermelho, sem link.
             data.publicado_dou = False
@@ -1291,7 +1358,7 @@ def _parse_args(argv=None):
     ano = args.ano_opt or args.ano
     if not numero or not ano:
         parser.error("Informe o número e o ano da portaria. Ex.: python3 "
-                     "portaria_formatter.py 164 2026")
+                    "portaria_formatter.py 164 2026")
     return numero, ano, args.template, args.output
 
 
