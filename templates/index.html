@@ -187,6 +187,7 @@ function renderLog(lines){
 
 function mostrarResultado(jobId, res, numero, ano){
   if (!res){ mostrarErro('Sem resultado.'); return; }
+  window.currentJobId = jobId; // Guarda o ID para o campo manual
   const badge = document.getElementById('badge');
   if (res.publicado_dou){
     badge.className = 'badge dou';
@@ -199,14 +200,55 @@ function mostrarResultado(jobId, res, numero, ano){
   let meta = res.n_paragrafos_corpo + ' parágrafo(s) no corpo';
   if (res.assinaturas && res.assinaturas.length) meta += ' · ' + res.assinaturas.join(', ');
   if (res.publicacao_campo) meta += '<br><b>Publicação:</b> ' + escapeHtml(res.publicacao_campo);
+  
   if (res.dou_cert_url) meta += '<br><a href="'+res.dou_cert_url+'" target="_blank">Abrir versão certificada no DOU</a>';
-  if (res.dou_link_impreciso) meta += '<br><span style="color:#b26a00">⚠ O DOU está instável no momento: o link aponta para a edição da seção (não a página exata). Gere novamente mais tarde para o link preciso.</span>';
+  
+  // NOVO: Bloco para inserir link manual se o PDF não foi baixado
+  if (res.dou_link_impreciso && !res.has_pdf) {
+    meta += `
+      <div id="manual-dou-area" style="margin-top:15px; padding:12px; border:1px dashed #b26a00; border-radius:8px; background:#fff9f0">
+        <span style="color:#b26a00; font-weight:600">⚠️ O PDF não foi baixado automaticamente.</span><br>
+        <small>Cole abaixo a URL da página do DOU (versão certificada):</small><br>
+        <input type="text" id="manual-url-input" style="width:70%; padding:5px; margin-top:5px; border-radius:4px; border:1px solid #ccc" placeholder="https://pesquisa.in.gov.br/...">
+        <button onclick="enviarUrlManual()" id="btn-manual" style="width:auto; padding:5px 10px; font-size:0.85rem">Anexar PDF</button>
+        <div id="manual-status" style="font-size:0.8rem; margin-top:5px"></div>
+      </div>
+    `;
+  } else if (res.dou_link_impreciso) {
+    meta += '<br><span style="color:#b26a00">⚠ Link do DOU impreciso, mas o PDF foi anexado manualmente.</span>';
+  }
+  
   document.getElementById('rMeta').innerHTML = meta;
 
-  let dl = '<a class="btn-dl docx" href="/download/'+jobId+'/docx">⬇ Baixar .docx</a>';
-  if (res.has_pdf) dl += '<a class="btn-dl pdf" href="/download/'+jobId+'/pdf">⬇ PDF certificado (DOU)</a>';
+  let dl = '<a class=\"btn-dl docx\" href=\"/download/'+jobId+'/docx\">⇓ Baixar .docx</a>';
+  if (res.has_pdf) dl += '<a class=\"btn-dl pdf\" href=\"/download/'+jobId+'/pdf\">⇓ PDF certificado (DOU)</a>';
   document.getElementById('downloads').innerHTML = dl;
   resultBox.classList.add('show');
+}
+
+// NOVA FUNÇÃO: Envia o link para o backend
+async function enviarUrlManual() {
+  const url = document.getElementById('manual-url-input').value.trim();
+  const status = document.getElementById('manual-status');
+  if (!url) return;
+
+  status.innerHTML = "⏳ Baixando PDF...";
+  try {
+    const resp = await fetch('/attach_cert_url', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ job_id: window.currentJobId, cert_url: url })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+        status.innerHTML = "<b style='color:green'>✔ Sucesso! Atualizando...</b>";
+        setTimeout(() => { location.reload(); }, 1500);
+    } else {
+        status.innerHTML = "<b style='color:red'>❌ Erro: " + (data.error || 'falha') + "<​/b>";
+    }
+  } catch (e) {
+    status.innerHTML = "<b style='color:red'>❌ Erro de conexão.</b>";
+  }
 }
 
 function mostrarErro(msg){
