@@ -20,6 +20,7 @@ import os
 import threading
 import traceback
 import uuid
+import re
 from contextlib import redirect_stdout
 from datetime import datetime
 
@@ -168,8 +169,9 @@ if __name__ == "__main__":
 def attach_cert_url():
     """
     Recebe JSON/form com: job_id, cert_url
-    Tenta baixar o PDF certificado a partir da URL fornecida, extrai texto
-    (quando possível) e re-gera o .docx usando o PDF certificado — atualiza o JOB.
+    Baixa o PDF certificado, tenta extrair/parsear texto, MAS só substitui
+    o texto do job se a extração do DOU for realmente válida para a portaria
+    solicitada. Regera o .docx e atualiza o JOB.
     """
     data_in = request.get_json(silent=True) or request.form
     job_id = data_in.get("job_id")
@@ -184,72 +186,145 @@ def attach_cert_url():
             return jsonify({"error": "job não encontrado."}), 404
         numero = job["numero"]
         ano = job["ano"]
+        current_result = job.get("result") or {}
 
     try:
         session = pf.make_session()
         dou = pf.DOUClient(session)
         cnmp = pf.CNMPClient(session)
 
-        # Se o usuário colou diretamente o servlet do PDF, usamos tal qual;
-        # se colou a URL 'visualiza', construímos o servlet com _build_pdf_url.
+        # Normaliza servlet / cert_url fornecido
         if "INPDFViewer" in cert_url or "servlet/INPDFViewer" in cert_url:
             servlet = cert_url
             cert = cert_url if "visualiza" in cert_url else ""
         else:
-            # tenta construir servlet a partir da visualiza
             servlet = dou._build_pdf_url(cert_url)
             cert = cert_url
 
-        # Monta PortariaData mínimo
         pdata = pf.PortariaData(numero=numero, ano=ano)
         pdata.dou_cert_url = cert or ""
         pdata.dou_pdf_servlet_url = servlet or ""
 
-        # Caminho onde salvar o PDF
         pdf_name = f"{ano}.Portaria-CNMP-PRESI.{numero}-DOU-certificada.pdf"
         pdf_path = os.path.join(OUTPUT_DIR, pdf_name)
 
-        # Baixa o PDF
-        res_pdf = dou.download_certified_pdf(pdata, pdf_path)
-        if not res_pdf:
+        res = dou.download_certified_pdf(pdata, pdf_path)
+        if not res:
             return jsonify({"error": "Falha ao baixar o PDF certificado."}), 500
 
-        # Tenta extrair texto do PDF para preencher título/corpo (melhora o .docx)
-        texto = pf.DOUClient.extract_pdf_text(pdf_path)
-        if texto:
-            parsed = pf.parse_portaria_text(texto, numero, ano)
+        # tenta extrair texto do PDF do DOU (pode devolver a edição inteira)
+        novo_texto = pf.DOUClient.extract_pdf_text(pdf_path) or ""
+        parsed = pf.parse_portaria_text(novo_texto, numero, ano) if novo_texto else None
+
+        # valida se o parsed realmente se refere à portaria esperada:
+        parsed_num = None
+        if parsed and parsed.get("titulo"):
+            m = re.search(r"N[°ºO]?\s*(\d+)", parsed["titulo"])
+            if m:
+                parsed_num = int(m.group(1))
+        # número deve bater com o solicitado; caso contrário, descartamos parsed
+        if parsed and parsed_num != numero:
+            log(f"attach_cert_url: parsed encontrado, mas título refere-se a nº {parsed_num} (esperado {numero}) -> descartando parsed DOU.")
+            parsed = None
+
+        # contar parágrafos atuais / novos
+        current_n_par = (current_result.get("n_paragrafos_corpo") or 0) if current_result else 0
+        new_n_par = len(parsed["corpo"]) if parsed and parsed.get("corpo") else 0
+
+        # Heurística de substituição:
+        # - se não tínhamos texto antes (current_n_par == 0) e novo tem >=1 -> replace
+        # - ou se novo tem >= current_n_par (não piora) e tem pelo menos 1 par -> replace
+        # - jamais substituir quando não houver matched number (parsed is None)
+        replace_text = False
+        if parsed and new_n_par >= 1 and (current_n_par == 0 or new_n_par >= current_n_par):
+            replace_text = True
+
+        # Se decidimos substituir, aplicamos os campos parseados ao pdata
+        if replace_text:
             pdata.titulo = parsed.get("titulo") or pdata.titulo
             pdata.ementa = parsed.get("ementa", "")
+            pdata.notas = parsed.get("notas", [])
             pdata.preambulo = parsed.get("preambulo", "")
             pdata.corpo = parsed.get("corpo", [])
             pdata.assinaturas = parsed.get("assinaturas", [])
             pdata.cargos = parsed.get("cargos", [])
             pdata.fonte_texto = "DOU-PDF"
+        else:
+            # preserva o texto já disponível (ex.: extraído do CNMP)
+            if current_result:
+                # tenta reaproveitar os campos que já estavam no resultado
+                pdata.titulo = current_result.get("titulo") or pdata.titulo
+                pdata.ementa = current_result.get("ementa", "")
+                # Não sobrescrever corpo quando já existia e parsed não é confiável
+                pdata.corpo = []  # vazio aqui; o builder usará job["result"] ao reconstruir
+                pdata.assinaturas = current_result.get("assinaturas", []) or []
+                pdata.cargos = current_result.get("cargos", []) or []
+                pdata.fonte_texto = current_result.get("fonte_texto") or ""
+            else:
+                # nada disponível: aceita parsed mesmo que seja frágil
+                if parsed:
+                    pdata.titulo = parsed.get("titulo") or pdata.titulo
+                    pdata.corpo = parsed.get("corpo", [])
+                    pdata.assinaturas = parsed.get("assinaturas", [])
+                    pdata.cargos = parsed.get("cargos", [])
+                    pdata.fonte_texto = "DOU-PDF"
 
-        # Re-gera o .docx usando o template (garante que o título terá o link correto)
+        # Atualiza urls no pdata
+        pdata.dou_cert_url = cert or pdata.dou_cert_url
+        pdata.dou_pdf_servlet_url = servlet or pdata.dou_pdf_servlet_url
+
+        # Regera o .docx: se NÃO substituímos o corpo, precisamos reconstruir usando o
+        # conteúdo já presente no job["result"] (para preservar o texto bom).
         builder = pf.PortariaDocBuilder(pf.TEMPLATE_PATH, cnmp)
+        # Se não replace_text e result continha corpo/ementa, preencher pdata a partir dele:
+        if not replace_text and current_result:
+            # tenta recuperar corpo/ementa do resultado atual (caso o gerador anterior tenha salvo)
+            prev_docx = current_result.get("docx_path")
+            # prefira usar os campos simples do result (se existirem)
+            if current_result.get("n_paragrafos_corpo", 0) > 0:
+                # recupera campo título/ementa/assinaturas já disponíveis
+                pdata.titulo = current_result.get("titulo") or pdata.titulo
+                pdata.ementa = current_result.get("ementa", "")
+                # caso o resultado anterior tenha sido gerado com PortariaData, os campos
+                # já estariam em job["result"]; senão, preservamos o que há.
+                # NOTA: se você mantiver no future o corpo serializado em job["result"],
+                # aqui podemos re-hidratar.
+            else:
+                # sem corpo anterior: se parsed existir, use-o (fall-back)
+                if parsed:
+                    pdata.corpo = parsed.get("corpo", [])
+
+        # build e save (sempre re-gera o docx para atualizar o link do título)
         builder.build(pdata)
         docx_name = f"{ano}.Portaria-CNMP-PRESI.{numero}.docx"
         docx_path = os.path.join(OUTPUT_DIR, docx_name)
         builder.save(docx_path)
 
-        # Atualiza o job em memória
+        # Atualiza o JOB com os novos caminhos / links (sem apagar outras chaves)
         with JOBS_LOCK:
             job = JOBS.get(job_id)
             if job.get("result") is None:
                 job["result"] = {}
+            # atualiza n_paragrafos_corpo: se substituímos, new_n_par, senão mantém o antigo
             job["result"].update({
                 "dou_cert_url": pdata.dou_cert_url,
                 "dou_pdf_servlet_url": pdata.dou_pdf_servlet_url,
-                "dou_page_url": pdata.dou_page_url,
                 "pdf_path": pdf_path,
                 "docx_path": docx_path,
+                "n_paragrafos_corpo": new_n_par if replace_text else (current_result.get("n_paragrafos_corpo") or 0),
+                "fonte_texto": pdata.fonte_texto or current_result.get("fonte_texto"),
             })
 
-        return jsonify({"ok": True, "pdf_path": pdf_path, "docx_path": docx_path})
+        return jsonify({
+            "ok": True,
+            "pdf_path": pdf_path,
+            "docx_path": docx_path,
+            "replaced_text": replace_text,
+            "new_paragraphs": new_n_par,
+            "old_paragraphs": current_result.get("n_paragrafos_corpo") or 0,
+        })
 
     except Exception as exc:
-        import traceback
         tb = traceback.format_exc()
         log(f"attach_cert_url: exceção: {exc}\n{tb}")
         return jsonify({"error": "erro interno ao anexar a URL do DOU."}), 500
