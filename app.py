@@ -2,15 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Interface web (Flask) para geração automatizada de Portarias da Presidência do CNMP.
-
-Fluxo:
-  - O usuário informa apenas o NÚMERO e o ANO da portaria.
-  - O backend executa `gerar_portaria` (busca no DOU, baixa a versão certificada,
-    extrai o texto, busca links das portarias mencionadas no portal do CNMP e
-    gera o .docx formatado).
-  - A geração roda em uma thread; o front-end faz polling do progresso e, ao
-    final, oferece o download do .docx (e do PDF certificado, quando houver).
-
 Uso:
     python3 app.py            # sobe em 0.0.0.0:3000
 """
@@ -161,10 +152,6 @@ def download(job_id, tipo):
     return send_file(path, as_attachment=True, download_name=os.path.basename(path))
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "3000"))
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
-
 @app.route("/attach_cert_url", methods=["POST"])
 def attach_cert_url():
     """
@@ -225,7 +212,7 @@ def attach_cert_url():
                 parsed_num = int(m.group(1))
         # número deve bater com o solicitado; caso contrário, descartamos parsed
         if parsed and parsed_num != numero:
-            log(f"attach_cert_url: parsed refere-se a nº {parsed_num} (esperado {numero}) -> descartando parsed DOU.")
+            pf.log(f"attach_cert_url: parsed refere-se a nº {parsed_num} (esperado {numero}) -> descartando parsed DOU.")
             parsed = None
 
         # conta parágrafos atuais / novos (se tivermos contagem anterior)
@@ -259,8 +246,6 @@ def attach_cert_url():
 
         else:
             # Não substituímos: PRESERVAR o .docx existente se houver.
-            # Caso exista um .docx gerado antes, reidratamos o corpo a partir dele
-            # e re-geramos o .docx apenas para atualizar o link/título (opcional).
             docx_path = current_result.get("docx_path")
             if docx_path and os.path.exists(docx_path):
                 try:
@@ -297,7 +282,7 @@ def attach_cert_url():
                     builder.save(docx_path)
                 except Exception as exc_doc:
                     # se algo falhar ao reidratar, não removemos o .docx antigo:
-                    log(f"attach_cert_url: falha ao reidratar docx existente: {exc_doc}")
+                    pf.log(f"attach_cert_url: falha ao reidratar docx existente: {exc_doc}")
                     docx_path = current_result.get("docx_path")
             else:
                 # sem docx existente: se parsed for válido aceitar parsed
@@ -344,5 +329,10 @@ def attach_cert_url():
 
     except Exception as exc:
         tb = traceback.format_exc()
-        log(f"attach_cert_url: exceção: {exc}\n{tb}")
+        pf.log(f"attach_cert_url: exceção: {exc}\n{tb}")
         return jsonify({"error": "erro interno ao anexar a URL do DOU."}), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "3000"))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
